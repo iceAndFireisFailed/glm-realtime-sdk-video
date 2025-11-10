@@ -2,10 +2,14 @@ package tools
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/go-audio/audio"
 	"github.com/go-audio/wav"
@@ -120,4 +124,76 @@ func Pcm2Wav(pcmBytes []byte, sampleRate, numChannels, bitDepth int) ([]byte, er
 	copy(wavData[44:], pcmBytes)
 
 	return wavData, nil
+}
+
+func ExtractFramesAsBase64(videoBase64 string) ([]string, error) {
+	// Step 1: 解码 Base64 得到视频数据
+	videoData, err := base64.StdEncoding.DecodeString(videoBase64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 input: %w", err)
+	}
+
+	// Step 2: 创建临时目录
+	tmpDir, err := os.MkdirTemp("", "video_frames_*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer func(path string) {
+		err := os.RemoveAll(path)
+		if err != nil {
+			log.Printf("Failed to remove temp dir %s: %v", path, err)
+		}
+	}(tmpDir) // 函数退出后清理
+
+	inputPath := filepath.Join(tmpDir, "input.mp4")
+	outputPattern := filepath.Join(tmpDir, "frame_%04d.jpg")
+
+	// Step 3: 写入解码后的视频数据
+	if err := os.WriteFile(inputPath, videoData, 0666); err != nil {
+		return nil, fmt.Errorf("failed to write input video: %w", err)
+	}
+
+	// Step 4: 调用 ffmpeg 抽帧（每秒 2 帧）
+	cmd := exec.Command("ffmpeg", "-i", inputPath,
+		"-vf", "fps=2", // 每秒 2 帧
+		"-qscale:v", "2", // JPEG 质量（2~32，越小质量越高）
+		"-f", "image2", // 输出图像序列
+		outputPattern)
+
+	// 可选：显示 ffmpeg 日志用于调试
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err = cmd.Run()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg failed: %w", err)
+	}
+
+	// Step 5: 查找所有生成的 JPEG 文件
+	files, err := filepath.Glob(outputPattern)
+	if err != nil {
+		return nil, fmt.Errorf("failed to match output files: %w", err)
+	}
+
+	var jpegBase64s []string
+	for _, file := range files {
+		f, err := os.Open(file)
+		if err != nil {
+			log.Printf("Failed to open %s: %v", file, err)
+			continue
+		}
+
+		data, err := io.ReadAll(f)
+		_ = f.Close()
+		if err != nil {
+			log.Printf("Failed to read %s: %v", file, err)
+			continue
+		}
+
+		// 将每个 JPEG 图片编码为 Base64 字符串
+		encoded := base64.StdEncoding.EncodeToString(data)
+		jpegBase64s = append(jpegBase64s, encoded)
+	}
+	fmt.Printf("Extracted %d frames (2 FPS), encoded as base64\n", len(jpegBase64s))
+	return jpegBase64s, nil
 }
