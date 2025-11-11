@@ -131,7 +131,7 @@ func (r *realtimeClient) SendFrameByVideo(event *events.Event) (err error) {
 	if event.ClientTimestamp <= 0 {
 		event.ClientTimestamp = time.Now().UnixMilli()
 	}
-	frames, err := tools.ExtractFramesAsBase64(event.Audio)
+	frames, err := tools.ExtractFramesToBase64(event.Audio, "Z0LADJoFAAABMA==", "aM48gA==")
 	if err != nil {
 		return fmt.Errorf("extract frames failed: %v", err)
 	}
