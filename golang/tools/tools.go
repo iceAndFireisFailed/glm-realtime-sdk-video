@@ -127,8 +127,8 @@ func Pcm2Wav(pcmBytes []byte, sampleRate, numChannels, bitDepth int) ([]byte, er
 }
 
 // ExtractFramesToBase64 接收 base64 编码的 H.264 数据，返回抽帧后图片的 base64 数组
-func ExtractFramesToBase64(base64H264, spsB64, ppsB64 string) ([]string, error) {
-	var base64Images []string
+func ExtractFramesToBase64(data []byte, spsB64, ppsB64 string) ([][]byte, error) {
+	var images [][]byte
 	// 创建临时目录
 	tempDir, err := os.MkdirTemp("", "video_process_*")
 	if err != nil {
@@ -143,10 +143,6 @@ func ExtractFramesToBase64(base64H264, spsB64, ppsB64 string) ([]string, error) 
 
 	// 1. 解码 base64 到 .h264 文件
 	h264Path := filepath.Join(tempDir, "input.h264")
-	data, err := base64.StdEncoding.DecodeString(base64H264)
-	if err != nil {
-		return nil, fmt.Errorf("base64 decode failed: %v", err)
-	}
 	// 注入 SPS/PPS
 	fixedData, err := InjectSPSPPS(data, spsB64, ppsB64)
 	if err != nil {
@@ -195,12 +191,11 @@ func ExtractFramesToBase64(base64H264, spsB64, ppsB64 string) ([]string, error) 
 		if err != nil {
 			return nil, fmt.Errorf("read image file failed: %v", err)
 		}
-		base64Img := base64.StdEncoding.EncodeToString(imgData)
-		base64Images = append(base64Images, base64Img)
+		images = append(images, imgData)
 	}
 
-	log.Printf("Successfully extracted %d frames.", len(base64Images))
-	return base64Images, nil
+	log.Printf("Successfully extracted %d frames.", len(images))
+	return images, nil
 }
 
 func InjectSPSPPS(rawH264 []byte, b64SPS, b64PPS string) ([]byte, error) {
