@@ -126,74 +126,118 @@ func Pcm2Wav(pcmBytes []byte, sampleRate, numChannels, bitDepth int) ([]byte, er
 	return wavData, nil
 }
 
-func ExtractFramesAsBase64(videoBase64 string) ([]string, error) {
-	// Step 1: 解码 Base64 得到视频数据
-	videoData, err := base64.StdEncoding.DecodeString(videoBase64)
+// ExtractFramesToBase64 接收 base64 编码的 H.264 数据，返回抽帧后图片的 base64 数组
+func ExtractFramesToBase64(base64H264, spsB64, ppsB64 string) ([]string, error) {
+	var base64Images []string
+	// 创建临时目录
+	tempDir, err := os.MkdirTemp("", "video_process_*")
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode base64 input: %w", err)
-	}
-
-	// Step 2: 创建临时目录
-	tmpDir, err := os.MkdirTemp("", "video_frames_*")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp dir: %w", err)
+		return nil, fmt.Errorf("failed to create temp dir: %v", err)
 	}
 	defer func(path string) {
 		err := os.RemoveAll(path)
 		if err != nil {
-			log.Printf("Failed to remove temp dir %s: %v", path, err)
+			log.Printf("failed to remove temp dir: %v", err)
 		}
-	}(tmpDir) // 函数退出后清理
+	}(tempDir) // 自动清理
 
-	inputPath := filepath.Join(tmpDir, "input.mp4")
-	outputPattern := filepath.Join(tmpDir, "frame_%04d.jpg")
-
-	// Step 3: 写入解码后的视频数据
-	if err := os.WriteFile(inputPath, videoData, 0666); err != nil {
-		return nil, fmt.Errorf("failed to write input video: %w", err)
+	// 1. 解码 base64 到 .h264 文件
+	h264Path := filepath.Join(tempDir, "input.h264")
+	data, err := base64.StdEncoding.DecodeString(base64H264)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode failed: %v", err)
+	}
+	// 注入 SPS/PPS
+	fixedData, err := InjectSPSPPS(data, spsB64, ppsB64)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	// Step 4: 调用 ffmpeg 抽帧（每秒 2 帧）
-	cmd := exec.Command("ffmpeg", "-i", inputPath,
-		"-vf", "fps=2", // 每秒 2 帧
-		"-qscale:v", "2", // JPEG 质量（2~32，越小质量越高）
-		"-f", "image2", // 输出图像序列
-		outputPattern)
+	if err := os.WriteFile(h264Path, fixedData, 0644); err != nil {
+		return nil, fmt.Errorf("write h264 file failed: %v", err)
+	}
 
-	// 可选：显示 ffmpeg 日志用于调试
+	// 2. 设置输出帧路径
+	framePattern := filepath.Join(tempDir, "frame_%04d.jpg")
+
+	// 3. 调用 ffmpeg 抽帧
+	cmd := exec.Command(
+		"ffmpeg",
+		"-f", "h264",
+		"-i", h264Path,
+		"-vf", "fps=2", // 每秒 2 帧
+		"-qscale:v", "2", // 高质量 JPEG
+		"-y", // 允许覆盖
+		framePattern,
+	)
+
+	// 捕获输出用于调试（可选）
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	log.Printf("Running command: %v", cmd.Args)
 	err = cmd.Run()
 	if err != nil {
-		return nil, fmt.Errorf("ffmpeg failed: %w", err)
+		return nil, fmt.Errorf("ffmpeg execution failed: %v", err)
 	}
 
-	// Step 5: 查找所有生成的 JPEG 文件
-	files, err := filepath.Glob(outputPattern)
+	// 4. 查找所有生成的 jpg 文件并转为 base64
+	matches, err := filepath.Glob(filepath.Join(tempDir, "frame_*.jpg"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to match output files: %w", err)
+		return nil, fmt.Errorf("glob pattern error: %v", err)
 	}
 
-	var jpegBase64s []string
-	for _, file := range files {
-		f, err := os.Open(file)
-		if err != nil {
-			log.Printf("Failed to open %s: %v", file, err)
-			continue
-		}
+	// 按文件名排序（保证顺序）
+	sortFiles(matches)
 
-		data, err := io.ReadAll(f)
-		_ = f.Close()
+	for _, imgPath := range matches {
+		imgData, err := os.ReadFile(imgPath) // 替代 ioutil.ReadFile
 		if err != nil {
-			log.Printf("Failed to read %s: %v", file, err)
-			continue
+			return nil, fmt.Errorf("read image file failed: %v", err)
 		}
-
-		// 将每个 JPEG 图片编码为 Base64 字符串
-		encoded := base64.StdEncoding.EncodeToString(data)
-		jpegBase64s = append(jpegBase64s, encoded)
+		base64Img := base64.StdEncoding.EncodeToString(imgData)
+		base64Images = append(base64Images, base64Img)
 	}
-	fmt.Printf("Extracted %d frames (2 FPS), encoded as base64\n", len(jpegBase64s))
-	return jpegBase64s, nil
+
+	log.Printf("Successfully extracted %d frames.", len(base64Images))
+	return base64Images, nil
+}
+
+func InjectSPSPPS(rawH264 []byte, b64SPS, b64PPS string) ([]byte, error) {
+	sps, err := base64.StdEncoding.DecodeString(b64SPS)
+	if err != nil {
+		return nil, fmt.Errorf("decode SPS failed: %v", err)
+	}
+	pps, err := base64.StdEncoding.DecodeString(b64PPS)
+	if err != nil {
+		return nil, fmt.Errorf("decode PPS failed: %v", err)
+	}
+
+	// 构造完整数据：[start code][SPS][start code][PPS][原始数据]
+	var result []byte
+
+	// 写入 SPS
+	result = append(result, 0x00, 0x00, 0x00, 0x01)
+	result = append(result, sps...)
+
+	// 写入 PPS
+	result = append(result, 0x00, 0x00, 0x00, 0x01)
+	result = append(result, pps...)
+
+	// 写入原始数据（即你现在拿到的 Type 1 流）
+	result = append(result, rawH264...)
+
+	return result, nil
+}
+
+// sortFiles 简单排序文件名（如 frame_0001.jpg, frame_0002.jpg）
+func sortFiles(files []string) {
+	// 使用标准库排序
+	for i := 0; i < len(files); i++ {
+		for j := i + 1; j < len(files); j++ {
+			if files[i] > files[j] {
+				files[i], files[j] = files[j], files[i]
+			}
+		}
+	}
 }
