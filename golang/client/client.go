@@ -118,8 +118,8 @@ func (r *realtimeClient) SendFrameByVideo(event *events.Event) (err error) {
 	if events.RealtimeClientVideoAppend != event.Type {
 		return fmt.Errorf("event type is not RealtimeClientVideoAppend")
 	}
-	if event.Audio == "" {
-		return fmt.Errorf("event audio is nil")
+	if event.VideoFrame == nil {
+		return fmt.Errorf("event videoFrame is nil")
 	}
 
 	r.lock.RLock()
@@ -131,12 +131,12 @@ func (r *realtimeClient) SendFrameByVideo(event *events.Event) (err error) {
 	if event.ClientTimestamp <= 0 {
 		event.ClientTimestamp = time.Now().UnixMilli()
 	}
-	frames, err := tools.ExtractFramesToBase64(event.Audio, "Z0LADJoFAAABMA==", "aM48gA==")
+	frames, err := tools.ExtractFramesToBase64(event.VideoFrame, "Z0LADJoFAAABMA==", "aM48gA==")
 	if err != nil {
 		return fmt.Errorf("extract frames failed: %v", err)
 	}
 	for index := range frames {
-		event.Audio = frames[index]
+		event.VideoFrame = frames[index]
 		if err = r.conn.WriteMessage(websocket.TextMessage, []byte(event.ToJson())); err != nil {
 			log.Printf("[RealtimeClient] Send failed, error: %v\n", err)
 			return err
